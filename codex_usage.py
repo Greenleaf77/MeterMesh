@@ -160,7 +160,10 @@ def _validated_state_rollout(value: object) -> tuple[Path, Path, str] | None:
     path = Path(value)
     if not path.is_absolute() or ".." in path.parts or not ROLLOUT_FILENAME.fullmatch(path.name):
         return None
-    session_indexes = [index for index, part in enumerate(path.parts) if part == "sessions"]
+    session_indexes = [
+        index for index, part in enumerate(path.parts)
+        if part in {"sessions", "archived_sessions"}
+    ]
     if not session_indexes:
         return None
     try:

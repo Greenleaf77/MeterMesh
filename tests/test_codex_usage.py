@@ -154,6 +154,37 @@ class CodexUsageAdapterTests(unittest.TestCase):
         self.assertNotIn(".codex-work", " ".join(stored))
         self.assertNotIn("rollout-shared", " ".join(stored))
 
+    def test_imports_archived_rollout_paths_from_state(self):
+        archived_path = self.codex_root / "archived_sessions" / "rollout-archived.jsonl"
+        write_rows(archived_path, [
+            session_meta("archived"),
+            token("2026-07-16T12:00:00Z", usage(7), rate_limits={"used": 1}),
+        ])
+        write_state(
+            self.codex_root / "state_5.sqlite",
+            [("archived", str(archived_path), "gpt-archived")],
+        )
+
+        result = self.import_source()
+
+        self.assertEqual(result["files"], 1)
+        self.assertEqual(len(self.unibase.active_event_rows("codex")), 1)
+        source = self.unibase.sources("codex")[0]
+        self.assertEqual(source["discovery_status"], "ready")
+        self.assertFalse(source["stale"])
+
+    def test_state_rollout_validation_rejects_unsafe_paths(self):
+        unsafe_paths = [
+            "sessions/rollout-relative.jsonl",
+            str(self.codex_root / "sessions" / ".." / "rollout-parent.jsonl"),
+            str(self.codex_root / "sessions" / "transcript.jsonl"),
+            str(self.codex_root / "other" / "rollout-unregistered.jsonl"),
+        ]
+
+        for path in unsafe_paths:
+            with self.subTest(path=path):
+                self.assertIsNone(codex_usage._validated_state_rollout(path))
+
     def test_missing_state_preserves_committed_external_events(self):
         external_path = self.root / ".codex-work" / "sessions" / "b" / "rollout-external.jsonl"
         write_rows(external_path, [session_meta("external"), token("2026-07-16T12:01:00Z", usage(7))])

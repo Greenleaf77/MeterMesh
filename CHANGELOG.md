@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.2.3 - 2026-08-09
+
+- Added Codex `archived_sessions` ingestion so archived rollout files remain indexed without leaving the live source in an error state.
+
 ## 2.2.2 - 2026-07-17
 
 - Added a multi-stage Docker runtime that serves the built dashboard and API from one non-root container bound to `127.0.0.1`.
