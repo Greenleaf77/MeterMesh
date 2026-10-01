@@ -26,6 +26,10 @@ def exact(timestamp, response_id, token_usage):
     return {"timestamp": timestamp, "type": "event_msg", "payload": {"type": "raw_response_completed", "response_id": response_id, "token_usage": token_usage}}
 
 
+def turn_context(timestamp, model):
+    return {"timestamp": timestamp, "type": "turn_context", "payload": {"model": model}}
+
+
 def token(timestamp, last, total=None, rate_limits=None):
     return {
         "timestamp": timestamp,
@@ -131,11 +135,82 @@ class CodexUsageAdapterTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["input_tokens"], 9)
 
+    def test_historical_models_override_current_thread_model(self):
+        path = self.codex_root / "sessions" / "a" / "rollout-a.jsonl"
+        write_rows(path, [
+            session_meta("session-1", "gpt-6-astra"),
+            token("2026-09-23T12:00:00Z", usage(10, 2, 3)),
+            turn_context("2026-09-28T12:00:00Z", "gpt-6-sol"),
+            token("2026-09-28T12:00:01Z", usage(20, 4, 5)),
+            turn_context("2026-09-30T12:00:00Z", "gpt-6.1-sol"),
+            token("2026-09-30T12:00:01Z", usage(30, 6, 7)),
+        ])
+        write_state(self.codex_root / "state_5.sqlite", [("session-1", str(path), "gpt-6.1-sol")])
+
+        self.import_source()
+
+        events = self.unibase.active_event_rows("codex")
+        self.assertEqual(
+            [(row["timestamp_utc"][:10], row["model"], row["input_tokens"]) for row in events],
+            [("2026-09-23", "gpt-6-astra", 8), ("2026-09-28", "gpt-6-sol", 16), ("2026-09-30", "gpt-6.1-sol", 24)],
+        )
+        self.assertEqual(sum(row["cache_read_tokens"] for row in events), 12)
+        self.assertEqual(sum(row["output_tokens"] for row in events), 15)
+
+    def test_missing_or_invalid_turn_model_keeps_last_known_model(self):
+        path = self.codex_root / "sessions" / "a" / "rollout-a.jsonl"
+        rows = [session_meta("session-1"), turn_context("2026-09-28T12:00:00Z", "gpt-6-sol")]
+        for index, model in enumerate((None, "", "  ", 42), 1):
+            rows.extend([
+                turn_context(f"2026-09-28T12:00:0{index}Z", model),
+                token(f"2026-09-28T12:00:1{index}Z", usage(index)),
+            ])
+        rows.extend([
+            {"type": "turn_context", "payload": {}},
+            {"type": "turn_context", "payload": []},
+            token("2026-09-28T12:00:20Z", usage(5)),
+        ])
+        write_rows(path, rows)
+
+        self.import_source()
+
+        events = self.unibase.active_event_rows("codex")
+        self.assertEqual(len(events), 5)
+        self.assertEqual({row["model"] for row in events}, {"gpt-6-sol"})
+
+    def test_old_parser_checkpoint_reimports_historical_models_during_resync(self):
+        path = self.codex_root / "sessions" / "a" / "rollout-a.jsonl"
+        write_rows(path, [
+            session_meta("session-1", None),
+            turn_context("2026-09-28T12:00:00Z", "gpt-6-sol"),
+            token("2026-09-28T12:00:01Z", usage(20, 4, 5)),
+        ])
+        write_state(self.codex_root / "state_5.sqlite", [("session-1", str(path), "gpt-6.1-sol")])
+        self.import_source()
+        file_key = next(iter(self.unibase.source_file_keys("codex-live")))
+        checkpoint = self.unibase.file_checkpoint("codex-live", file_key)
+        old_event = {**self.unibase.active_event_rows("codex")[0], "model": "gpt-6.1-sol"}
+        self.unibase.replace_source_file_events("codex-live", checkpoint["source_file_id"], [old_event], 1)
+        self.unibase.rebuild_active_events()
+        with self.unibase.connect() as conn:
+            conn.execute("update source_files set parser_version = 3")
+
+        result = codex_usage.import_codex_source(
+            self.unibase, self.unibase.sources("codex")[0], non_destructive=True,
+        )
+
+        events = self.unibase.active_event_rows("codex")
+        self.assertEqual(result["scanned_files"], 1)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["model"], "gpt-6-sol")
+        self.assertEqual(events[0]["input_tokens"], 16)
+        self.assertEqual(self.import_source()["scanned_files"], 0)
+
     def test_imports_additional_rollout_paths_from_state(self):
         default_path = self.codex_root / "sessions" / "a" / "rollout-shared.jsonl"
         external_path = self.root / ".codex-work" / "sessions" / "b" / "rollout-shared.jsonl"
-        write_rows(default_path, [session_meta("default"), token("2026-07-16T12:00:00Z", usage(5), rate_limits={"used": 1})])
-        write_rows(external_path, [session_meta("external"), token("2026-07-16T12:01:00Z", usage(7), rate_limits={"used": 2})])
+        write_rows(default_path, [session_meta("default", None), token("2026-07-16T12:00:00Z", usage(5), rate_limits={"used": 1})])
+        write_rows(external_path, [session_meta("external", None), token("2026-07-16T12:01:00Z", usage(7), rate_limits={"used": 2})])
         write_state(
             self.codex_root / "state_5.sqlite",
             [("default", str(default_path), "gpt-default"), ("external", str(external_path), "gpt-external")],
@@ -187,7 +262,7 @@ class CodexUsageAdapterTests(unittest.TestCase):
 
     def test_missing_state_preserves_committed_external_events(self):
         external_path = self.root / ".codex-work" / "sessions" / "b" / "rollout-external.jsonl"
-        write_rows(external_path, [session_meta("external"), token("2026-07-16T12:01:00Z", usage(7))])
+        write_rows(external_path, [session_meta("external", None), token("2026-07-16T12:01:00Z", usage(7))])
         state_path = self.codex_root / "state_5.sqlite"
         write_state(state_path, [("external", str(external_path), "gpt-external")])
         self.import_source()
