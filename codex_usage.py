@@ -11,7 +11,7 @@ from pathlib import Path
 from unibase import Unibase, open_source_sqlite_readonly, sanitize_error, stable_id
 
 
-PARSER_VERSION = 3
+PARSER_VERSION = 4
 DEDUP_USAGE_FIELDS = (
     "input_tokens",
     "cached_input_tokens",
@@ -82,9 +82,14 @@ def scan_rollout_deduplicated_usage(rollout_path: Path, stream_key: str, model: 
             except json.JSONDecodeError:
                 diagnostics["malformed_lines"] += 1
                 continue
+            payload = item.get("payload") or {}
+            if item.get("type") in {"session_meta", "turn_context"}:
+                historical_model = payload.get("model") if isinstance(payload, dict) else None
+                if isinstance(historical_model, str) and historical_model.strip():
+                    model = historical_model.strip()
+                continue
             if item.get("type") != "event_msg":
                 continue
-            payload = item.get("payload") or {}
             if not isinstance(payload, dict) or payload.get("type") != "token_count":
                 continue
             diagnostics["token_count_events"] += 1
@@ -316,7 +321,7 @@ def import_codex_source(
                     "stream_key": stream_key,
                     "timestamp_utc": item["timestamp_utc"],
                     "occurred_at": item["occurred_at"],
-                    "model": model,
+                    "model": item["model"],
                     "native_provider_id": "openai",
                     "semantics": "codex_global_dedup",
                     "classification": item["classification"],

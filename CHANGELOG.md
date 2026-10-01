@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.2.4 - 2026-10-01
+
+- Fixed Codex usage model attribution to follow historical session metadata and turn contexts instead of assigning a thread's current model to all past usage.
+- Updated the Codex parser version so existing indexed rollouts are automatically reimported with corrected models while preserving token totals and deduplication.
+
 ## 2.2.3 - 2026-08-09
 
 - Added Codex `archived_sessions` ingestion so archived rollout files remain indexed without leaving the live source in an error state.
