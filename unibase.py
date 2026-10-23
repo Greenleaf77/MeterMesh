@@ -1362,7 +1362,7 @@ class Unibase:
                     "content_blobs", "source_files",
                 ):
                     conn.execute(f"delete from {table}")
-                conn.execute("update sources set discovery_status = 'not_indexed', stale = 0, last_successful_generation = null, file_count = 0, event_count = 0, last_successful_scan = null, error = null")
+                conn.execute("update sources set discovery_status = case when discovery_status = 'not_installed' then 'not_installed' else 'not_indexed' end, stale = 0, last_successful_generation = null, file_count = 0, event_count = 0, last_successful_scan = null, error = null")
                 conn.execute("update app_settings set generation = generation + 1, state = 'reset_empty', updated_at = ? where id = 1", (utc_now(),))
 
     def integrity_check(self) -> bool:

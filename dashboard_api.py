@@ -2067,7 +2067,7 @@ def display_path(path: Path) -> str:
 
 def unibase_freshness(database: Unibase, provider: str = "all") -> str | None:
     with database.connect(readonly=True) as conn:
-        clauses = ["enabled = 1"]
+        clauses = ["enabled = 1", "discovery_status != 'not_installed'"]
         params: list[object] = []
         if provider != "all":
             clauses.append("provider = ?")
@@ -2216,6 +2216,41 @@ def import_registered_source(
             raise
 
 
+def enabled_sources_for_import(
+    database: Unibase,
+    opencode_live_db: Path | None = None,
+    codex_state_db: Path | None = None,
+) -> list[dict]:
+    sources = []
+    for source in database.sources():
+        if not source["enabled"]:
+            continue
+        if source["kind"] == "live":
+            root = Path(source["root_path"])
+            if source["provider"] == "codex":
+                markers = [codex_state_db or root / "state_5.sqlite", root / "sessions", root / "archived_sessions"]
+            elif source["provider"] == "claude":
+                markers = [root if root.name == "projects" else root / "projects"]
+            else:
+                markers = [opencode_live_db or root / "opencode.db"]
+            # An absent installation is optional; a disappearing indexed source
+            # is an error. Check before a staging reset erases file checkpoints.
+            if (
+                not any(path.exists() for path in markers)
+                and not source["file_count"]
+                and not source["event_count"]
+                and not database.source_file_keys(source["source_id"])
+            ):
+                with database.connect() as conn:
+                    conn.execute(
+                        "update sources set discovery_status = 'not_installed', stale = 0, error = null where source_id = ?",
+                        (source["source_id"],),
+                    )
+                continue
+        sources.append(source)
+    return sources
+
+
 def refresh_enabled_sources(
     unibase_path: Path,
     opencode_live_db: Path | None = None,
@@ -2240,7 +2275,7 @@ def refresh_enabled_sources(
             claude_root=claude_root,
             opencode_root=opencode_live_db.parent if opencode_live_db else None,
         )
-        sources = database.sources()
+        sources = enabled_sources_for_import(database, opencode_live_db, codex_state_db)
         print(
             f"[MeterMesh timing] source discovery: {(time.perf_counter() - discovery_started_at) * 1000:.0f} ms; "
             f"registered={len(sources)}",
@@ -2446,7 +2481,7 @@ def resync_worker(
     try:
         if database.settings()["state"] == "reset_empty":
             raise RuntimeError("Cannot resync an empty Unibase; use Reset to rebuild it")
-        enabled_sources = [source for source in database.sources() if source["enabled"]]
+        enabled_sources = enabled_sources_for_import(database, opencode_live_db, codex_state_db)
         total = len(enabled_sources)
         database.update_operation(operation_id, state="running", current=0, total=total)
         for index, source in enumerate(enabled_sources, 1):
@@ -2486,6 +2521,7 @@ def reset_worker(
     try:
         main.update_operation(operation_id, state="running", current=0, total=0)
         codex_live_requires_state = codex_state_db is not None
+        enabled_sources = enabled_sources_for_import(main, opencode_live_db, codex_state_db)
         if staging_path.exists():
             staging_path.unlink()
         with main.connect(readonly=True) as source_conn:
@@ -2498,7 +2534,6 @@ def reset_worker(
         staging.reset(allow_active_operation=True)
         with staging.connect() as conn:
             conn.execute("update app_settings set state = 'ready' where id = 1")
-        enabled_sources = [source for source in staging.sources() if source["enabled"]]
         total = len(enabled_sources)
         main.update_operation(operation_id, state="running", current=0, total=total)
         for index, source in enumerate(enabled_sources, 1):

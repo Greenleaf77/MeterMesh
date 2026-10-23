@@ -303,6 +303,43 @@ class CodexUsageAdapterTests(unittest.TestCase):
                 require_state_inventory=True,
             )
 
+    def test_incomplete_state_preserves_missing_default_rollout_and_imports_new_usage(self):
+        old_path = self.codex_root / "sessions" / "rollout-old.jsonl"
+        write_rows(old_path, [session_meta("old"), token("2026-07-16T12:00:00Z", usage(7))])
+        state_path = self.codex_root / "state_5.sqlite"
+        write_state(state_path, [("old", str(old_path), "gpt-test")])
+        self.import_source()
+        old_path.unlink()
+        write_rows(self.codex_root / "sessions" / "rollout-new.jsonl", [
+            session_meta("new"), token("2026-07-17T12:00:00Z", usage(11)),
+        ])
+
+        self.import_source()
+
+        self.assertEqual(sum(row["input_tokens"] for row in self.unibase.active_event_rows("codex")), 18)
+        self.assertTrue(self.unibase.sources("codex")[0]["stale"])
+        # Once the authoritative inventory is complete, normal removal still works.
+        with sqlite3.connect(state_path) as conn:
+            conn.execute("delete from threads")
+        self.import_source()
+        self.assertEqual(sum(row["input_tokens"] for row in self.unibase.active_event_rows("codex")), 11)
+
+    def test_non_object_records_do_not_abort_source_import(self):
+        path = self.codex_root / "sessions" / "rollout-malformed.jsonl"
+        write_rows(path, [
+            None, [], "session_meta", 42,
+            {"type": "session_meta", "payload": ["invalid"]},
+            session_meta("valid"),
+            token("2026-07-16T12:00:00Z", usage(7)),
+            None,
+            token("2026-07-16T12:01:00Z", usage(11)),
+        ])
+
+        result = self.import_source()
+
+        self.assertEqual(sum(row["input_tokens"] for row in self.unibase.active_event_rows("codex")), 18)
+        self.assertEqual(result["malformed_lines"], 6)
+
     def test_windows_filename_uuid_fallback(self):
         path = self.root / "folder\\rollout-2026-07-16T00-00-00-123e4567-e89b-12d3-a456-426614174000.jsonl"
         write_rows(path, [exact("2026-07-16T12:00:00Z", "response-1", usage(5))])

@@ -556,6 +556,25 @@ function renderHeatmap(heat, months, heatColumns, accountingMode) {
   `;
 }
 
+function heatmapScrollPosition() {
+  const wrap = document.querySelector(".heat-wrap");
+  if (!wrap) return null;
+  return {
+    firstDay: wrap.querySelector(".heat-cell:first-child")?.dataset.tooltipDate,
+    lastDay: wrap.querySelector(".heat-cell:last-child")?.dataset.tooltipDate,
+    rightOffset: Math.max(0, wrap.scrollWidth - wrap.clientWidth - wrap.scrollLeft),
+  };
+}
+
+function restoreHeatmapScroll(position) {
+  const wrap = document.querySelector(".heat-wrap");
+  if (!wrap) return;
+  const current = heatmapScrollPosition();
+  const sameRange = position && position.firstDay === current.firstDay && position.lastDay === current.lastDay;
+  // Start at recent dates; retain the user's position when the same range rerenders.
+  wrap.scrollLeft = wrap.scrollWidth - wrap.clientWidth - (sameRange ? position.rightOffset : 0);
+}
+
 function renderTokensOverTime(chart, accountingMode) {
   const days = chart.days || [];
   const models = chart.models || [];
@@ -670,7 +689,7 @@ function renderChartBar(day, models, colors, maxTokens, index, labelEvery, dayCo
         ${(day.models || []).map((item) => {
           const itemTokens = metricValue(item, accountingMode);
           const segmentHeight = tokens ? (itemTokens / tokens) * 100 : 0;
-          return `<div class="bar-segment" style="height: ${segmentHeight}%; background: ${colors.get(item.model) || modelColorForSlot(0)}" data-tooltip-title="${escapeHtml(item.model)}" data-tooltip-body="${escapeHtml(title)}<br>${full(itemTokens)} tokens ${accountingLabel}"></div>`;
+          return `<div class="bar-segment" data-chart-model="${escapeHtml(item.model)}" style="height: ${segmentHeight}%; background: ${colors.get(item.model) || modelColorForSlot(0)}" data-tooltip-title="${escapeHtml(item.model)}" data-tooltip-body="${escapeHtml(title)}<br>${full(itemTokens)} tokens ${accountingLabel}"></div>`;
         }).join("")}
       </div>
       <div class="bar-label">${escapeHtml(label)}</div>
@@ -683,7 +702,7 @@ function renderChartLegend(models, colors) {
   return `
     <div class="chart-legend">
       ${models.map((row) => `
-        <span class="legend-item">
+        <span class="legend-item" data-chart-model="${escapeHtml(row.model)}" tabindex="0">
           <span class="legend-swatch" style="background: ${colors.get(row.model) || modelColorForSlot(0)}"></span>
           <span>${escapeHtml(row.model)}</span>
         </span>
@@ -926,7 +945,7 @@ function renderUsageTables(data) {
 function renderDataHealth(diagnostics) {
   const summary = diagnostics.summary;
   const sources = diagnostics.sources || [];
-  const enabledSources = sources.filter((source) => source.enabled);
+  const enabledSources = sources.filter((source) => source.enabled && source.status !== "not_installed");
   const readySources = enabledSources.filter((source) => source.status === "ready" && !source.stale && !source.error);
   const staleSources = enabledSources.filter((source) => source.stale);
   const errorSources = enabledSources.filter((source) => source.status === "error" || source.error);
@@ -979,7 +998,10 @@ function renderDataHealth(diagnostics) {
     .map((source) => {
       let state = "good";
       let stateLabel = "Ready";
-      if (!source.enabled) {
+      if (source.status === "not_installed") {
+        state = "muted";
+        stateLabel = "Not installed";
+      } else if (!source.enabled) {
         state = "muted";
         stateLabel = "Disabled";
       } else if (source.status === "error" || source.error) {
@@ -1141,8 +1163,10 @@ function cancelDiagnosticsRequest() {
 function updateTableView(data) {
   const container = document.querySelector("#table-view-container");
   if (!container) return;
+  const heatmapPosition = heatmapScrollPosition();
   hideModelNameTooltip();
   container.innerHTML = renderTableView(data);
+  restoreHeatmapScroll(heatmapPosition);
   bindTableView(data);
 }
 
@@ -1308,6 +1332,23 @@ function bindTableView(data) {
     item.addEventListener("mouseleave", handleChartTooltipLeave);
     item.addEventListener("focus", showChartTooltip);
     item.addEventListener("blur", hideHeatTooltip);
+  });
+
+  const chartModelItems = document.querySelectorAll("[data-chart-model]");
+  let hoveredChartModel = null;
+  let focusedChartModel = null;
+  const highlightChartModel = () => {
+    const model = hoveredChartModel ?? focusedChartModel;
+    chartModelItems.forEach((item) => {
+      item.classList.toggle("is-model-highlighted", model !== null && item.dataset.chartModel === model);
+      item.classList.toggle("is-model-muted", model !== null && item.dataset.chartModel !== model);
+    });
+  };
+  chartModelItems.forEach((item) => {
+    item.addEventListener("mouseenter", () => { hoveredChartModel = item.dataset.chartModel; highlightChartModel(); });
+    item.addEventListener("mouseleave", () => { hoveredChartModel = null; highlightChartModel(); });
+    item.addEventListener("focus", () => { focusedChartModel = item.dataset.chartModel; highlightChartModel(); });
+    item.addEventListener("blur", () => { focusedChartModel = null; highlightChartModel(); });
   });
 
   const retry = document.querySelector(".diagnostics-retry");
@@ -1517,7 +1558,7 @@ function renderSourceGroup(provider, sources) {
               <strong>${escapeHtml(source.label)}${source.original ? '<span class="source-origin-badge">Original</span>' : ""}</strong>
               <small title="${escapeHtml(source.path)}">${escapeHtml(source.path)} · ${formatMegabytes(source.size_bytes)} · ${full(source.event_count)} events</small>
             </span>
-            <em class="source-status status-${escapeHtml(source.status)}">${escapeHtml(source.status)}${source.stale ? " · stale" : ""}</em>
+            <em class="source-status status-${escapeHtml(source.status)}">${source.status === "not_installed" ? "Not installed" : escapeHtml(source.status)}${source.stale ? " · stale" : ""}</em>
           </label>
         `;
       }).join("") : '<p class="settings-empty">No sources discovered.</p>'}</div>
@@ -1721,7 +1762,7 @@ function scheduleSourceSyncPoll(data) {
       if (!currentData) return;
       const generationChanged = Number(payload.generation) !== Number(currentData.generation);
       if (generationChanged && payload.source_sync?.state !== "running") {
-        usageCache.clear();
+        invalidateDashboardCaches();
         await refresh();
         return;
       }
@@ -1865,6 +1906,7 @@ function renderSparkline(values, label) {
 }
 
 function render(data) {
+  const heatmapPosition = heatmapScrollPosition();
   hideModelNameTooltip();
   currentData = data;
   const provider = data.provider || "all";
@@ -2010,6 +2052,7 @@ function render(data) {
     <div id="table-view-container">${renderTableView(data)}</div>
   `;
 
+  restoreHeatmapScroll(heatmapPosition);
   bindTableView(data);
   if (activeTableView === "diagnostics") ensureDiagnostics(data);
   if (activeTableView === "requests") ensureRequests(data);
