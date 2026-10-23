@@ -2,7 +2,7 @@
   "name": "metermesh",
   "description": "Local multi-provider usage dashboard backed by the privacy-preserving Unibase index.",
   "private": false,
-  "version": "2.2.4",
+  "version": "2.2.5",
   "license": "MIT",
   "type": "module",
   "scripts": {

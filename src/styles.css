@@ -623,6 +623,24 @@ h2.section-title {
   border-radius: 999px;
 }
 
+[data-chart-model] {
+  transition: opacity 140ms ease, filter 140ms ease;
+}
+
+[data-chart-model].is-model-highlighted {
+  filter: brightness(1.2);
+}
+
+[data-chart-model].is-model-muted {
+  opacity: 0.3;
+}
+
+.legend-item:focus-visible {
+  outline: 2px solid var(--text-secondary);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
 .chart-empty {
   padding: 48px 12px;
   color: var(--text-tertiary);
@@ -3324,7 +3342,8 @@ tbody tr:hover td {
 
 @media (prefers-reduced-motion: reduce) {
   .seg,
-  .heat-tooltip {
+  .heat-tooltip,
+  [data-chart-model] {
     transition: none;
   }
 

@@ -86,6 +86,21 @@ Example manifest:
 
 Legacy full copies placed directly under `add_stat` are detected only at fixed safe roots. New backups are registered unchecked. Legacy copies require two stable inventory observations before import.
 
+## Codex Accounting Policy
+
+Codex usage is deduplicated globally across live files, copied subagent histories,
+and backups by normalized `last_token_usage` plus canonicalized `rate_limits`.
+The earliest available timestamp wins. Session IDs and timestamps deliberately
+do not participate in the key: copied history can occur in another session.
+Independent requests with identical usage and limits therefore count as one;
+different limit snapshots count separately. This is an intentional accounting
+tradeoff introduced in commits `c92078b` and `6f9a0db`, not an exact billing ledger.
+
+An incomplete Codex state inventory retains previously indexed files, including
+ordinary session files, while importing available new data. Full rebuild still
+requires a complete inventory. Providers with no installation or indexed history
+are skipped; a missing previously indexed source remains an error.
+
 ## Privacy
 
 Unibase stores usage metadata, hashed stream/event identities, token components, model/provider identifiers, cost semantics, and source provenance. It does not store prompts, responses, tool output, cwd, attachments, project paths, session titles, credentials, auth tokens, or account identity.

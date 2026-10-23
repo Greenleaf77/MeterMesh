@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.5 - 2026-10-23
+
+- Opened overflowing heatmaps at the most recent dates while preserving manual scroll position when the same date range refreshes.
+- Preserved previously indexed Codex history when the live state inventory references missing rollout files, while keeping full rebuilds blocked until the inventory is complete.
+- Skipped never-installed providers during source refresh and rebuild without hiding errors for previously indexed sources that disappear.
+- Made Codex imports tolerate non-object JSON records and malformed payload types without aborting the source scan.
+- Refreshed Requests and diagnostics caches after background source synchronization so the dashboard shows newly indexed usage.
+- Added model highlighting in Tokens over time from both legend hover and bar-segment hover, with keyboard focus support in the legend.
+- Documented the intentional global Codex deduplication policy for copied subagent histories and overlapping backups without changing its accounting rules.
+
 ## 2.2.4 - 2026-10-01
 
 - Fixed Codex usage model attribution to follow historical session metadata and turn contexts instead of assigning a thread's current model to all past usage.

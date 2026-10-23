@@ -33,6 +33,8 @@ def normalize_dedup_usage(value: object) -> tuple[int, int, int, int, int]:
 
 
 def make_dedup_key(usage: object, rate_limits: object) -> str:
+    # Deliberately global across sessions and backups: child rollouts may copy
+    # parent telemetry. See README's Codex accounting policy before changing it.
     canonical = canonical_json({"usage": normalize_dedup_usage(usage), "rate_limits": rate_limits})
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -82,7 +84,13 @@ def scan_rollout_deduplicated_usage(rollout_path: Path, stream_key: str, model: 
             except json.JSONDecodeError:
                 diagnostics["malformed_lines"] += 1
                 continue
+            if not isinstance(item, dict):
+                diagnostics["malformed_lines"] += 1
+                continue
             payload = item.get("payload") or {}
+            if not isinstance(payload, dict):
+                diagnostics["malformed_lines"] += 1
+                continue
             if item.get("type") in {"session_meta", "turn_context"}:
                 historical_model = payload.get("model") if isinstance(payload, dict) else None
                 if isinstance(historical_model, str) and historical_model.strip():
@@ -146,7 +154,11 @@ def rollout_metadata(path: Path, content_hash: str) -> tuple[str, str]:
                 item = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(item, dict):
+                continue
             payload = item.get("payload") or {}
+            if not isinstance(payload, dict):
+                continue
             if payload.get("type") == "session_meta" or item.get("type") == "session_meta":
                 session_id = payload.get("id") or payload.get("session_id")
                 model = payload.get("model") or model
@@ -349,9 +361,10 @@ def import_codex_source(
             )
             parsed_files += 1
         if is_live and not state_inventory_complete:
+            # Missing state entries can refer to ordinary sessions too. Until
+            # the inventory is complete, absence is not evidence of deletion.
             seen_paths.extend(
                 key for key in unibase.source_file_keys(source_id, file_kind="codex_rollout")
-                if key.startswith("external:")
             )
         if non_destructive:
             seen_paths.extend(key for key in unibase.source_file_keys(source_id) if key not in seen_paths)
@@ -361,7 +374,7 @@ def import_codex_source(
             seen_paths,
             rebuild_active=False,
             dirty_event_keys=dirty_event_keys,
-            complete=not non_destructive,
+            complete=not non_destructive and (not is_live or state_inventory_complete),
         )
         if is_live and not state_inventory_complete:
             unibase.mark_source_error(source_id, "Codex state inventory is incomplete; retained committed data")
