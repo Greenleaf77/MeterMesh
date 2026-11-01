@@ -25,7 +25,7 @@ ENV PYTHONUNBUFFERED=1 \
     METERMESH_ALLOW_REMOTE=1
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tzdata bash \
+ && apt-get install -y --no-install-recommends tzdata bash zstd \
  && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system --gid 10001 metermesh \

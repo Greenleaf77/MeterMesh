@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import contextlib
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 
 from unibase import Unibase, open_source_sqlite_readonly, sanitize_error, stable_id
@@ -20,7 +22,43 @@ DEDUP_USAGE_FIELDS = (
     "total_tokens",
 )
 ROLLOUT_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-ROLLOUT_FILENAME = re.compile(r"^rollout-.*\.jsonl$")
+ROLLOUT_FILENAME = re.compile(r"^rollout-.*\.jsonl(?:\.zst)?$")
+
+
+def logical_rollout_path(path: Path) -> Path:
+    return path.with_suffix("") if path.name.endswith(".jsonl.zst") else path
+
+
+def available_rollout_path(path: Path) -> Path:
+    logical = logical_rollout_path(path)
+    return logical if logical.is_file() else Path(str(logical) + ".zst")
+
+
+@contextlib.contextmanager
+def open_rollout_text(path: Path, *, validate: bool = True):
+    if not path.name.endswith(".jsonl.zst"):
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            yield handle
+        return
+    try:
+        process = subprocess.Popen(
+            ["zstd", "-d", "-c", "-q", "--", str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace",
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("Reading compressed Codex rollouts requires the zstd command; install Zstandard") from exc
+    try:
+        with process.stdout as handle:
+            yield handle
+            if validate and process.wait() != 0:
+                raise RuntimeError("Cannot decompress Codex rollout: corrupt or incomplete Zstandard data")
+    finally:
+        # Metadata reads only the header; stop the producer without buffering
+        # the remaining transcript or leaving a blocked subprocess behind.
+        if process.poll() is None:
+            process.terminate()
+        process.wait()
 
 
 def canonical_json(value: object) -> str:
@@ -76,7 +114,7 @@ def scan_rollout_deduplicated_usage(rollout_path: Path, stream_key: str, model: 
         "minimum_timestamp": None,
         "maximum_timestamp": None,
     }
-    with rollout_path.open(encoding="utf-8", errors="replace") as handle:
+    with open_rollout_text(rollout_path) as handle:
         for line_number, line in enumerate(handle, 1):
             diagnostics["processed_lines"] += 1
             try:
@@ -129,7 +167,12 @@ def scan_rollout_deduplicated_usage(rollout_path: Path, stream_key: str, model: 
 
 def codex_usage_files(root: Path) -> list[Path]:
     sessions = root / "sessions"
-    return sorted(path for path in sessions.glob("**/rollout-*.jsonl") if path.is_file()) if sessions.is_dir() else []
+    files = {}
+    for path in sorted(sessions.glob("**/rollout-*.jsonl*")) if sessions.is_dir() else []:
+        if path.is_file() and ROLLOUT_FILENAME.fullmatch(path.name):
+            # Prefer plain JSONL when both representations exist.
+            files.setdefault(logical_rollout_path(path), path)
+    return sorted(files.values())
 
 
 def _file_hash(path: Path) -> str:
@@ -143,7 +186,7 @@ def _file_hash(path: Path) -> str:
 def rollout_metadata(path: Path, content_hash: str) -> tuple[str, str]:
     session_id = None
     model = None
-    with path.open(encoding="utf-8", errors="ignore") as handle:
+    with open_rollout_text(path, validate=False) as handle:
         for _ in range(80):
             line = handle.readline()
             if not line:
@@ -215,6 +258,7 @@ def _state_rollouts(state_path: Path) -> tuple[dict[Path, str], bool]:
             complete = False
             continue
         path, _, _ = validated
+        path = logical_rollout_path(path)
         rollouts[path] = str(row["model"] or "(unknown)")
     return rollouts, complete
 
@@ -244,9 +288,9 @@ def import_codex_source(
     inventory: list[tuple[Path, str]] = []
     default_paths = set()
     for path in default_files:
-        resolved = path.resolve()
+        resolved = logical_rollout_path(path.resolve())
         default_paths.add(resolved)
-        relative = path.relative_to(root).as_posix()
+        relative = logical_rollout_path(path).relative_to(root).as_posix()
         inventory.append((path, f'file:{stable_id("codex", "source-file", relative)}'))
     for path in (sorted(state_rollouts) if is_live else []):
         if path in default_paths:
@@ -259,10 +303,11 @@ def import_codex_source(
         root_key = stable_id("codex", "rollout-root", str(sessions_root))
         file_key = stable_id("codex", "source-file", relative)
         external_key = f"external:{root_key}:{file_key}"
-        if not resolved.is_file():
+        physical = available_rollout_path(resolved)
+        if not physical.is_file() or _validated_state_rollout(str(physical)) is None:
             state_inventory_complete = False
             continue
-        inventory.append((resolved, external_key))
+        inventory.append((physical, external_key))
 
     if require_state_inventory and not state_inventory_complete:
         raise RuntimeError("Codex state inventory is unavailable or incomplete")
@@ -312,7 +357,8 @@ def import_codex_source(
                 scan_generation=scan_generation, parser_version=parser_version,
             )
             stream_key, metadata_model = rollout_metadata(path, content_hash)
-            model = state_rollouts.get(path.resolve(), backup_models.get(path.name, metadata_model))
+            logical = logical_rollout_path(path.resolve())
+            model = state_rollouts.get(logical, backup_models.get(logical.name, metadata_model))
             telemetry = scan_rollout_deduplicated_usage(path, stream_key, model)
             diagnostics = telemetry["diagnostics"]
             processed_lines += int(diagnostics["processed_lines"])

@@ -1,9 +1,12 @@
 import sqlite3
+import json
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
+import codex_usage
 import dashboard_api
 import unibase
 
@@ -23,11 +26,57 @@ class SourceAvailabilityTests(unittest.TestCase):
         self.claude = self.root / "claude"
         self.opencode = self.root / "opencode" / "custom-usage.sqlite"
 
-    def refresh(self):
+    def refresh(self, **kwargs):
         dashboard_api.refresh_enabled_sources(
             self.path, self.opencode, codex_root=self.codex,
             codex_state_db=self.state, claude_root=self.claude,
+            **kwargs,
         )
+
+    def test_incomplete_codex_inventory_keeps_incremental_checkpoints(self):
+        def append_usage(path, amount):
+            with path.open("a") as handle:
+                handle.write(json.dumps({
+                    "timestamp": "2026-11-01T12:00:00Z", "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {
+                        "last_token_usage": {"input_tokens": amount},
+                    }},
+                }) + "\n")
+
+        old = self.codex / "sessions" / "rollout-old.jsonl"
+        growing = self.codex / "sessions" / "rollout-growing.jsonl"
+        append_usage(old, 7)
+        append_usage(growing, 11)
+        with closing(sqlite3.connect(self.state)) as conn, conn:
+            conn.execute("insert into threads values (?, ?, ?)", ("old", str(old), "gpt-test"))
+        self.refresh()
+        old.unlink()
+        self.refresh()  # Inventory becomes incomplete; retained history makes it stale.
+
+        with patch.object(codex_usage, "_file_hash", wraps=codex_usage._file_hash) as hashed:
+            self.refresh()
+            hashed.assert_not_called()
+
+        new = self.codex / "sessions" / "rollout-new.jsonl"
+        append_usage(growing, 13)
+        append_usage(new, 17)
+        with patch.object(codex_usage, "scan_rollout_deduplicated_usage", wraps=codex_usage.scan_rollout_deduplicated_usage) as parsed:
+            self.refresh()
+            self.assertEqual({call.args[0] for call in parsed.call_args_list}, {growing, new})
+        self.assertEqual(sum(row["input_tokens"] for row in self.db.active_event_rows("codex")), 48)
+        source = self.db.sources("codex")[0]
+        self.assertTrue(source["stale"])
+        self.assertIn("incomplete", source["error"])
+
+        with patch.object(codex_usage, "scan_rollout_deduplicated_usage", wraps=codex_usage.scan_rollout_deduplicated_usage) as parsed:
+            self.refresh(force_full_scan=True)
+            self.assertEqual({call.args[0] for call in parsed.call_args_list}, {growing, new})
+        with self.db.connect() as conn:
+            conn.execute("update source_files set parser_version = 0 where source_id = ?", (source["source_id"],))
+        with patch.object(codex_usage, "scan_rollout_deduplicated_usage", wraps=codex_usage.scan_rollout_deduplicated_usage) as parsed:
+            self.refresh()
+            self.assertEqual({call.args[0] for call in parsed.call_args_list}, {growing, new})
+        self.assertEqual(sum(row["input_tokens"] for row in self.db.active_event_rows("codex")), 48)
 
     def install_opencode(self):
         self.opencode.parent.mkdir(exist_ok=True)

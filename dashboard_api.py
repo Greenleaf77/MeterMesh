@@ -2293,7 +2293,11 @@ def refresh_enabled_sources(
                 and not source_parser_outdated(database, source)
             ):
                 continue
-            source_force_full_scan = force_full_scan or bool(source["stale"])
+            # Live Codex can stay stale because old rollout paths are missing.
+            # Its per-file size/mtime/parser checkpoints remain valid in that
+            # state; only an explicit full scan should bypass them.
+            incremental_codex = source["provider"] == "codex" and source["kind"] == "live"
+            source_force_full_scan = force_full_scan or (bool(source["stale"]) and not incremental_codex)
             source_started_at = time.perf_counter()
             source_name = f'{source["provider"]}/{source["relative_name"]}'
             try:

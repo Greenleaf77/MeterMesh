@@ -1451,7 +1451,10 @@ def _safe_manifest_root(child: Path, root_value: object) -> Path | None:
 
 def _eligible_paths(provider: str, root: Path) -> list[Path]:
     if provider == "codex":
-        return sorted(path for path in (root / "sessions").glob("**/rollout-*.jsonl") if path.is_file())
+        return sorted(
+            path for pattern in ("**/rollout-*.jsonl", "**/rollout-*.jsonl.zst")
+            for path in (root / "sessions").glob(pattern) if path.is_file()
+        )
     if provider == "claude":
         projects = root / "projects"
         excluded = {"tool-results", "file-history"}

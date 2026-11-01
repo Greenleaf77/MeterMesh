@@ -417,10 +417,10 @@ class SettingsApiTests(unittest.TestCase):
         imported_ids = {call.args[1]["source_id"] for call in import_source.call_args_list}
         self.assertIn("claude-source", imported_ids)
 
-    def test_periodic_refresh_forces_full_reconciliation_for_stale_sources(self):
+    def test_stale_live_codex_keeps_checkpoints_while_stale_backups_force_full_scan(self):
         with self.db.connect() as conn:
             conn.execute(
-                "update sources set stale = 1, last_successful_scan = '2026-07-16T00:00:00Z' where source_id = 'codex-live'"
+                "update sources set enabled = 1, stale = 1, last_successful_scan = '2026-07-16T00:00:00Z' where provider = 'codex'"
             )
         with patch.object(dashboard_api, "register_default_sources"), patch.object(
             dashboard_api, "import_registered_source"
@@ -428,7 +428,9 @@ class SettingsApiTests(unittest.TestCase):
             dashboard_api.refresh_enabled_sources(self.path)
 
         live_call = next(call for call in import_source.call_args_list if call.args[1]["source_id"] == "codex-live")
-        self.assertTrue(live_call.kwargs["force_full_scan"])
+        self.assertFalse(live_call.kwargs["force_full_scan"])
+        backup_call = next(call for call in import_source.call_args_list if call.args[1]["source_id"] == "codex-backup")
+        self.assertTrue(backup_call.kwargs["force_full_scan"])
 
     def test_reset_confirmation_rebuilds_and_preserves_settings_and_registry(self):
         rollout = self.codex_root / "sessions" / "2026" / "07" / "16" / "rollout-test.jsonl"

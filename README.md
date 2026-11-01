@@ -35,6 +35,7 @@ Defaults:
 
 ```text
 Codex:    ~/.codex/sessions/**/rollout-*.jsonl
+          ~/.codex/sessions/**/rollout-*.jsonl.zst
 Claude:   ~/.claude/projects/**/*.jsonl
 OpenCode: $XDG_DATA_HOME/opencode/opencode.db
           or ~/.local/share/opencode/opencode.db
@@ -110,6 +111,12 @@ Requests and Settings APIs omit raw provider IDs and absolute source paths. Sour
 ## Run
 
 Requirements: Node.js 20+ and Python 3.10+.
+
+Reading compressed Codex histories (`.jsonl.zst`) also requires the `zstd` command
+on `PATH` (for example, `brew install zstd` on macOS or `apt install zstd` on
+Debian/Ubuntu). The Docker image includes it. Histories are decompressed as a
+stream without writing extracted transcripts to disk. Plain and compressed
+representations share a checkpoint identity and the same global deduplication.
 
 ```bash
 npm install
