@@ -1,7 +1,10 @@
 import json
+import shutil
 import sqlite3
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import codex_usage
@@ -72,6 +75,75 @@ class CodexUsageAdapterTests(unittest.TestCase):
             self.unibase,
             self.unibase.sources("codex")[0],
         )
+
+    def compress(self, path):
+        compressed = Path(str(path) + ".zst")
+        with compressed.open("wb") as handle:
+            subprocess.run(["zstd", "-q", "-c", str(path)], stdout=handle, check=True)
+        return compressed
+
+    @unittest.skipUnless(shutil.which("zstd"), "zstd CLI required")
+    def test_compression_migration_preserves_checkpoint_and_events(self):
+        path = self.codex_root / "sessions" / "rollout-test.jsonl"
+        write_rows(path, [session_meta("test"), token("2026-07-16T12:00:00Z", usage(7))])
+        write_state(self.codex_root / "state_5.sqlite", [("test", str(path), "gpt-test")])
+        self.import_source()
+        original = self.unibase.active_event_rows("codex")
+        keys = self.unibase.source_file_keys("codex-live")
+        self.compress(path)
+        self.import_source()  # Both formats exist: prefer the original, once.
+        self.assertEqual(self.unibase.source_file_keys("codex-live"), keys)
+        path.unlink()
+        self.import_source()
+        self.assertEqual(self.unibase.source_file_keys("codex-live"), keys)
+        event = self.unibase.active_event_rows("codex")
+        self.assertEqual(
+            [{key: value for key, value in row.items() if key != "generation"} for row in event],
+            [{key: value for key, value in row.items() if key != "generation"} for row in original],
+        )
+        self.assertFalse(self.unibase.sources("codex")[0]["stale"])
+        with patch.object(codex_usage, "_file_hash", wraps=codex_usage._file_hash) as hashed:
+            self.import_source()
+            hashed.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("zstd"), "zstd CLI required")
+    def test_compressed_archive_external_and_duplicate_history(self):
+        paths = [self.codex_root / "sessions" / "rollout-live.jsonl",
+                 self.codex_root / "archived_sessions" / "rollout-archive.jsonl",
+                 self.root / ".codex-work" / "sessions" / "rollout-external.jsonl"]
+        for path in paths:
+            write_rows(path, [session_meta("shared"), token("2026-07-16T12:00:00Z", usage(7))])
+            self.compress(path)
+            path.unlink()
+        write_state(self.codex_root / "state_5.sqlite", [
+            ("archive", str(paths[1]), "gpt-test"),
+            ("external", str(paths[2]) + ".zst", "gpt-test"),
+        ])
+        self.import_source()
+        self.assertEqual(len(self.unibase.source_file_keys("codex-live")), 3)
+        self.assertEqual(len(self.unibase.active_event_rows("codex")), 1)
+        self.assertFalse(self.unibase.sources("codex")[0]["stale"])
+
+    @unittest.skipUnless(shutil.which("zstd"), "zstd CLI required")
+    def test_corrupt_compressed_rollout_rolls_back_import(self):
+        path = self.codex_root / "sessions" / "rollout-test.jsonl"
+        write_rows(path, [session_meta("test"), token("2026-07-16T12:00:00Z", usage(7))])
+        self.import_source()
+        original = self.unibase.active_event_rows("codex")
+        compressed = self.compress(path)
+        path.unlink()
+        compressed.write_bytes(compressed.read_bytes()[:-5])
+        with self.assertRaisesRegex(RuntimeError, "decompress"):
+            dashboard_api.import_registered_source(self.unibase, self.unibase.sources("codex")[0])
+        self.assertEqual(self.unibase.active_event_rows("codex"), original)
+
+    def test_missing_zstd_reports_actionable_error(self):
+        path = self.codex_root / "sessions" / "rollout-test.jsonl.zst"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"compressed data")
+        with patch.object(codex_usage.subprocess, "Popen", side_effect=FileNotFoundError):
+            with self.assertRaisesRegex(RuntimeError, "requires the zstd command"):
+                self.import_source()
 
     def test_identical_and_prefix_copies_are_consolidated(self):
         first = [session_meta("session-1"), token("2026-07-16T12:00:00Z", usage(10, 2, 3), rate_limits={"used": 1})]

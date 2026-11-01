@@ -250,6 +250,12 @@ class UnibaseFoundationTests(unittest.TestCase):
         self.assertEqual(sources[1].status, "ready")
         self.assertFalse(any(source.enabled for source in sources))
 
+        # A migrated backup can contain only compressed rollouts.
+        (legacy / "rollout-b.jsonl").rename(legacy / "rollout-b.jsonl.zst")
+        compressed_sources = unibase.discover_backup_sources("codex", add_stat)
+        self.assertEqual([source.kind for source in compressed_sources], ["legacy_backup", "normalized_backup"])
+        self.assertEqual(compressed_sources[0].status, "ready")
+
     def test_rediscovery_preserves_existing_live_source_status(self):
         source = unibase.DiscoveredSource(
             "live", "codex", "live", self.root, "live", "Live", True, 1000, None, None, "not_indexed"

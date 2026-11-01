@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.3.0 - 2026-11-01
+
+- Added streaming imports for Codex `.jsonl.zst` histories, including archived sessions, additional profiles, and compressed backup discovery.
+- Kept plain and compressed representations under one checkpoint identity and the existing global deduplication policy, so compression migrations and overlapping histories do not double-count usage.
+- Made live Codex refreshes reuse per-file checkpoints even when historical paths are unavailable, avoiding repeated full scans while preserving explicit full reimports and parser-version upgrades.
+- Added rollback coverage for corrupt compressed histories and an actionable error when the required `zstd` command is missing.
+- Included `zstd` in the Docker runtime and documented the local dependency without extracting transcripts to disk.
+
 ## 2.2.5 - 2026-10-23
 
 - Opened overflowing heatmaps at the most recent dates while preserving manual scroll position when the same date range refreshes.
